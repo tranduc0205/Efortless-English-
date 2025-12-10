@@ -1,0 +1,141 @@
+// =================== PROJECT: RFID + SERVO DOOR + ALARM + BLYNK ===================
+// ------------- CLEAN, RÚT GỌN, CHIA MODULE, DỄ HIỂU -------------
+#define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
+#define BLYNK_TEMPLATE_NAME "Cua RFID"
+#define BLYNK_AUTH_TOKEN "xUgwUcmvOuELccgrYD7lIPurla-hQNI5"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+
+// =================== WIFI / BLYNK ===================
+
+
+char ssid[] = "Hostpot";
+char pass[] = "0123456788";
+
+// =================== PINS ===================
+// RFID
+#define SS_PIN   5
+#define RST_PIN  22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// Servo
+#define SERVO_PIN 14
+Servo doorServo;
+bool doorOpen = false;
+
+// LED & Button
+#define LED1 25
+#define LED2 26
+#define BTN1 32
+#define BTN2 33
+#define BTN_DOOR 27
+bool led1 = false, led2 = false;
+
+// =================== ALARM ===================
+#define FIRE_PIN 35
+#define SMOKE_PIN 34
+#define ALARM_RELAY 13
+#define ALARM_BTN 4
+
+const bool RELAY_ACTIVE_LOW = false;
+bool alarmActive = false;
+unsigned long alarmStart;
+const unsigned long ALARM_TIME = 4000;
+
+// =================== AUTHORIZED CARD ===================
+byte allowedUID[4] = {0xE7,0x8B,0x6B,0x06};
+
+// =================== UTILS ===================
+void setRelay(bool on){
+    digitalWrite(ALARM_RELAY, RELAY_ACTIVE_LOW ? !on : on);
+}
+
+void toggleDoor(){
+    doorOpen = !doorOpen;
+    doorServo.write(doorOpen ? 90 : 0);
+    Blynk.virtualWrite(V0, doorOpen);
+}
+
+bool checkCard(){
+    for(byte i=0;i<4;i++)
+        if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
+    return true;
+}
+
+// =================== BLYNK ===================
+BLYNK_WRITE(V0){ toggleDoor(); }
+BLYNK_WRITE(V1){ led1 = param.asInt(); digitalWrite(LED1,led1); }
+BLYNK_WRITE(V2){ led2 = param.asInt(); digitalWrite(LED2,led2); }
+
+// =================== SETUP ===================
+void setup(){
+    Serial.begin(115200);
+
+    pinMode(LED1,OUTPUT); pinMode(LED2,OUTPUT);
+    pinMode(BTN1,INPUT_PULLUP); pinMode(BTN2,INPUT_PULLUP);
+    pinMode(BTN_DOOR,INPUT_PULLUP);
+
+    pinMode(FIRE_PIN,INPUT);
+    pinMode(SMOKE_PIN,INPUT);
+    pinMode(ALARM_RELAY,OUTPUT);
+    pinMode(ALARM_BTN,INPUT_PULLUP);
+    setRelay(false);
+
+    doorServo.attach(SERVO_PIN,500,2400);
+    doorServo.write(0);
+
+    SPI.begin(18,19,23);
+    rfid.PCD_Init();
+
+    WiFi.begin(ssid,pass);
+    Blynk.config(BLYNK_AUTH_TOKEN);
+}
+
+// =================== LOOP ===================
+void loop(){
+    Blynk.run();
+
+    // ---- RFID ----
+    if(rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()){
+        if(checkCard()) toggleDoor();
+        rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+    }
+
+    // ---- Door Button ----
+    if(!digitalRead(BTN_DOOR)){
+        toggleDoor();
+        delay(250);
+    }
+
+    // ---- LED Buttons ----
+    if(!digitalRead(BTN1)){ led1 = !led1; digitalWrite(LED1,led1); Blynk.virtualWrite(V1,led1); delay(200);}    
+    if(!digitalRead(BTN2)){ led2 = !led2; digitalWrite(LED2,led2); Blynk.virtualWrite(V2,led2); delay(200);}    
+
+    // ---- ALARM AUTO ----
+    bool fire  = (digitalRead(FIRE_PIN)==LOW);
+    bool smoke = (digitalRead(SMOKE_PIN)==LOW);
+
+    if(!alarmActive && (fire||smoke)){
+        alarmActive = true;
+        alarmStart = millis();
+        setRelay(true);
+    }
+
+    // ---- ALARM BUTTON ----
+    if(!alarmActive && !digitalRead(ALARM_BTN)){
+        alarmActive = true;
+        alarmStart = millis();
+        setRelay(true);
+    }
+
+    // ---- STOP ALARM ----
+    if(alarmActive && millis()-alarmStart >= ALARM_TIME){
+        alarmActive = false;
+        setRelay(false);
+    }
+}
