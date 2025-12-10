@@ -1,0 +1,76 @@
+// ==================== PIN CONFIG ====================
+#define BUTTON_PIN 4        // nút nhấn
+#define FIRE_PIN   35       // cảm biến lửa
+#define SMOKE_PIN  34       // cảm biến khói
+#define RELAY_PIN  13       // relay còi
+
+// ==================== MODULE LOGIC ====================
+const bool RELAY_ACTIVE_LOW = false;   // set TRUE nếu test relay bật bằng LOW
+const bool SENSOR_ACTIVE_LOW = true;   // D0 = LOW khi có lửa/khói
+
+// ==================== SYSTEM STATE ====================
+bool relayState = false;         // trạng thái còi
+bool manualToggle = false;       // người dùng bấm nút
+unsigned long lastButton = 0;
+
+// ======================================================
+void setRelay(bool on) {
+  relayState = on;
+  digitalWrite(RELAY_PIN,
+      RELAY_ACTIVE_LOW ? (!on ? HIGH : LOW)
+                       : (on ? HIGH : LOW));
+}
+
+// ======================================================
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(SMOKE_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+
+  // tắt relay ban đầu
+  setRelay(false);
+
+  Serial.println("=== SYSTEM READY ===");
+}
+
+// ======================================================
+void loop() {
+  unsigned long now = millis();
+
+  // ==================== XỬ LÝ NÚT NHẤN ====================
+  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
+
+  if (pressed && (now - lastButton > 300)) {
+    lastButton = now;
+    manualToggle = !manualToggle;
+    setRelay(manualToggle);
+    Serial.printf("Button -> relay = %s (manual)\n",
+                  relayState ? "ON" : "OFF");
+  }
+
+  // nếu người dùng bật/tắt bằng nút → ưu tiên, không can thiệp
+  if (manualToggle) return;
+
+  // ==================== ĐỌC CẢM BIẾN ====================
+  bool fireTrig  = SENSOR_ACTIVE_LOW ? (digitalRead(FIRE_PIN)  == LOW)
+                                     : (digitalRead(FIRE_PIN)  == HIGH);
+
+  bool smokeTrig = SENSOR_ACTIVE_LOW ? (digitalRead(SMOKE_PIN) == LOW)
+                                     : (digitalRead(SMOKE_PIN) == HIGH);
+
+  // ==================== XỬ LÝ BÁO CHÁY ====================
+  if (fireTrig || smokeTrig) {
+    if (!relayState) {
+      Serial.println("🔥 Fire/Smoke detected -> ALARM ON");
+    }
+    setRelay(true);
+  } else {
+    if (relayState) {
+      Serial.println("No fire/smoke -> OFF");
+    }
+    setRelay(false);
+  }
+}
