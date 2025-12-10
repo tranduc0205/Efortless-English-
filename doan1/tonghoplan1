@@ -1,0 +1,296 @@
+#define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
+#define BLYNK_TEMPLATE_NAME "Cửa RFID"
+#define BLYNK_AUTH_TOKEN "xUgwUcmvOuELccgrYD7lIPurla-hQNI5"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+
+// =================== WIFI / BLYNK ===================
+char ssid[] = "Hostpot";
+char pass[] = "0123456788";
+
+// =================== RFID / SERVO / I/O ===================
+#define SS_PIN   5
+#define RST_PIN  22
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+#define SERVO_PIN 14
+Servo doorServo;
+
+#define BUTTON_DOOR 27
+
+#define LED_PIN 25
+#define BUTTON_LED 32
+
+#define LED2_PIN 26
+#define BUTTON_LED2 33
+
+byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
+bool doorState = false;
+
+bool ledState = false;
+int lastLedReading = HIGH;
+unsigned long lastDebounce = 0;
+const unsigned long debounceDelay = 50;
+
+bool led2State = false;
+int lastLed2Reading = HIGH;
+unsigned long lastDebounce2 = 0;
+
+// =================== ALARM (fire+smoke+còi) ===================
+// Pins for alarm subsystem (as you confirmed)
+#define ALARM_BUTTON_PIN 4   // nút nhấn còi
+#define ALARM_RELAY_PIN 13   // relay điều khiển còi
+#define FIRE_PIN 35          // cảm biến lửa (D0)
+#define SMOKE_PIN 34         // cảm biến khói (D0)
+
+// If your relay is active LOW set true (common for SRD modules)
+const bool RELAY_ACTIVE_LOW = false;
+// If D0 output goes LOW when detected, set true:
+const bool SENSOR_ACTIVE_LOW = true;
+
+// alarm timing
+const unsigned long ALARM_DURATION = 4000UL; // 4s
+
+// runtime state
+bool alarmActive = false;
+unsigned long alarmStart = 0;
+
+// for edge detection to avoid repeated triggers when sensor stays active
+int lastFireState = HIGH;
+int lastSmokeState = HIGH;
+
+// debounce for alarm button
+unsigned long lastAlarmBtn = 0;
+const unsigned long alarmBtnDebounce = 300;
+
+// =================== UTILS ===================
+void setRelay(bool on) {
+  if (RELAY_ACTIVE_LOW) digitalWrite(ALARM_RELAY_PIN, on ? LOW : HIGH);
+  else digitalWrite(ALARM_RELAY_PIN, on ? HIGH : LOW);
+}
+
+// Start alarm for ALARM_DURATION (4s)
+void startAlarm4s(const char *source) {
+  if (alarmActive) {
+    Serial.printf("[ALARM] Already active, ignoring start from %s\n", source);
+    return;
+  }
+  alarmActive = true;
+  alarmStart = millis();
+  setRelay(true);
+  Serial.printf("[ALARM] START by %s (for %lums)\n", source, ALARM_DURATION);
+}
+
+// =================== BLYNK CALLBACKS (unchanged) ===================
+BLYNK_WRITE(V0) {
+  // toggle door from Blynk
+  if (doorState) {
+    doorServo.write(0);
+    doorState = false;
+  } else {
+    doorServo.write(90);
+    doorState = true;
+  }
+  Blynk.virtualWrite(V0, doorState ? 1 : 0);
+}
+
+BLYNK_WRITE(V1) {
+  int value = param.asInt();
+  ledState = value;
+  digitalWrite(LED_PIN, ledState ? HIGH : LOW);
+}
+
+BLYNK_WRITE(V2) {
+  int value = param.asInt();
+  led2State = value;
+  digitalWrite(LED2_PIN, led2State ? HIGH : LOW);
+}
+
+// =================== SETUP ===================
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  Serial.println("\n=== SYSTEM BOOT ===");
+
+  // RFID SPI init
+  SPI.begin(18, 19, 23, SS_PIN);
+  mfrc522.PCD_Init();
+
+  // Servo
+  doorServo.attach(SERVO_PIN, 500, 2400);
+  doorServo.write(0); // closed by default
+  doorState = false;
+
+  // Buttons & LEDs (door project)
+  pinMode(BUTTON_DOOR, INPUT_PULLUP);
+  pinMode(BUTTON_LED, INPUT_PULLUP);
+  pinMode(BUTTON_LED2, INPUT_PULLUP);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  pinMode(LED2_PIN, OUTPUT);
+  digitalWrite(LED2_PIN, LOW);
+
+  // Alarm pins
+  pinMode(ALARM_BUTTON_PIN, INPUT_PULLUP); // button uses pullup -> pressed = LOW
+  pinMode(ALARM_RELAY_PIN, OUTPUT);
+  setRelay(false); // ensure relay off
+
+  // Sensor pins - D0 style digital input
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(SMOKE_PIN, INPUT);
+
+  // WiFi + Blynk (non-blocking Blynk.run in loop)
+  WiFi.begin(ssid, pass);
+  Blynk.config(BLYNK_AUTH_TOKEN);
+
+  Serial.println("System Ready: DOOR + RFID + LEDs + ALARM + BLYNK");
+}
+
+// =================== LOOP ===================
+void loop() {
+  unsigned long now = millis();
+
+  // Run Blynk frequently
+  Blynk.run();
+
+  // ------------- Manage alarm timeout -------------
+  if (alarmActive && (now - alarmStart >= ALARM_DURATION)) {
+    alarmActive = false;
+    setRelay(false);
+    Serial.println("[ALARM] STOP (timeout)");
+    // After stopping, we require sensors to go back to inactive and then active again
+    // edge detection handles that via lastFireState/lastSmokeState
+  }
+
+  // If alarm is active, ignore new triggers (so button press won't interrupt)
+  if (!alarmActive) {
+    // ---------- Alarm button (manual 4s) ----------
+    if ((now - lastAlarmBtn) > alarmBtnDebounce) {
+      if (digitalRead(ALARM_BUTTON_PIN) == LOW) {
+        lastAlarmBtn = now;
+        startAlarm4s("BUTTON");
+      }
+    }
+
+    // ---------- Sensor edge detection (fire/smoke) ----------
+    int rawFire = digitalRead(FIRE_PIN);
+    int rawSmoke = digitalRead(SMOKE_PIN);
+
+    // compute boolean current states depending on SENSOR_ACTIVE_LOW
+    bool fireNow  = SENSOR_ACTIVE_LOW ? (rawFire == LOW)  : (rawFire == HIGH);
+    bool smokeNow = SENSOR_ACTIVE_LOW ? (rawSmoke == LOW) : (rawSmoke == HIGH);
+
+    // Detect falling/rising edge appropriately:
+    // We trigger only on transition from INACTIVE -> ACTIVE
+    bool lastFireActive  = SENSOR_ACTIVE_LOW ? (lastFireState == LOW)  : (lastFireState == HIGH);
+    bool lastSmokeActive = SENSOR_ACTIVE_LOW ? (lastSmokeState == LOW) : (lastSmokeState == HIGH);
+
+    // If sensor becomes active now but was inactive before -> trigger
+    if (fireNow && !lastFireActive) {
+      startAlarm4s("FIRE_SENSOR");
+    }
+    if (smokeNow && !lastSmokeActive) {
+      startAlarm4s("SMOKE_SENSOR");
+    }
+
+    // update last states for edge detection AFTER checks
+    lastFireState = rawFire;
+    lastSmokeState = rawSmoke;
+  }
+
+  // ------------- Door physical button (keeps original behavior) -------------
+  static bool lastButtonDoorState = HIGH;
+  bool buttonDoorState = digitalRead(BUTTON_DOOR);
+  if (buttonDoorState == LOW && lastButtonDoorState == HIGH) {
+    Serial.println("Toggle Door by Physical Button");
+    if (doorState) {
+      doorServo.write(0);
+      doorState = false;
+    } else {
+      doorServo.write(90);
+      doorState = true;
+    }
+    Blynk.virtualWrite(V0, doorState ? 1 : 0);
+    delay(200); // small debounce/hold to avoid double toggle
+  }
+  lastButtonDoorState = buttonDoorState;
+
+  // ------------- LED button 1 (original debounce logic) -------------
+  int reading = digitalRead(BUTTON_LED);
+  if (reading != lastLedReading) lastDebounce = millis();
+
+  if ((millis() - lastDebounce) > debounceDelay) {
+    static int stableState = HIGH;
+    if (reading != stableState) {
+      stableState = reading;
+      if (stableState == LOW) {
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+        Blynk.virtualWrite(V1, ledState ? 1 : 0);
+      }
+    }
+  }
+  lastLedReading = reading;
+
+  // ------------- LED2 button (original debounce logic) -------------
+  int reading2 = digitalRead(BUTTON_LED2);
+  if (reading2 != lastLed2Reading) lastDebounce2 = millis();
+
+  if ((millis() - lastDebounce2) > debounceDelay) {
+    static int stable2 = HIGH;
+    if (reading2 != stable2) {
+      stable2 = reading2;
+      if (stable2 == LOW) {
+        led2State = !led2State;
+        digitalWrite(LED2_PIN, led2State);
+        Blynk.virtualWrite(V2, led2State ? 1 : 0);
+        Serial.print("LED2 -> ");
+        Serial.println(led2State ? "ON" : "OFF");
+      }
+    }
+  }
+  lastLed2Reading = reading2;
+
+  // ------------- RFID handling (non-blocking style) -------------
+  if (mfrc522.PICC_IsNewCardPresent()) {
+    if (mfrc522.PICC_ReadCardSerial()) {
+      Serial.print("Card UID: ");
+      for (byte i = 0; i < mfrc522.uid.size; i++) {
+        Serial.print(mfrc522.uid.uidByte[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+
+      // check UID (first 4 bytes as your code)
+      bool ok = true;
+      for (byte i = 0; i < 4; i++) {
+        if (mfrc522.uid.uidByte[i] != allowedUID[i]) { ok = false; break; }
+      }
+      if (ok) {
+        Serial.println("RFID Access Granted (Toggle)");
+        if (doorState) {
+          doorServo.write(0);
+          doorState = false;
+        } else {
+          doorServo.write(90);
+          doorState = true;
+        }
+        Blynk.virtualWrite(V0, doorState ? 1 : 0);
+      } else {
+        Serial.println("RFID Access Denied");
+      }
+      mfrc522.PICC_HaltA();
+      mfrc522.PCD_StopCrypto1();
+      delay(250); // small pause after reading card to avoid double-read
+    }
+  }
+
+  // tiny delay to yield CPU (keeps loop responsive)
+  delay(10);
+}
