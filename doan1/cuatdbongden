@@ -1,5 +1,5 @@
 // =================== PROJECT: RFID + SERVO DOOR + ALARM + BLYNK ===================
-// ADD: PIR (LOW = có người) + Blynk V3 bật/tắt PIR
+// ADD: PIR (LOW=có người) + LDR (LOW=tối) + Blynk V3
 
 #define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
 #define BLYNK_TEMPLATE_NAME "Cua RFID"
@@ -34,14 +34,15 @@ bool doorOpen = false;
 #define BTN_DOOR 27
 bool led1 = false, led2 = false;
 
-// =================== PIR ===================
-#define PIR_PIN     16        // LOW = có người
+// =================== PIR + LDR ===================
+#define PIR_PIN     16    // LOW = có người
+#define LDR_PIN     17    // LOW = trời tối
 #define PIR_RELAY   12
 const unsigned long PIR_TIME = 5000;
 
 unsigned long pirLastDetect = 0;
 bool pirOn = false;
-bool pirDisable = false;     // Blynk V3: ON = tắt PIR
+bool pirDisable = false;   // Blynk V3
 
 // =================== ALARM ===================
 #define FIRE_PIN     35
@@ -61,20 +62,20 @@ byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
 
 // =================== UTILS ===================
 void setRelay(bool on){
-    digitalWrite(ALARM_RELAY, RELAY_ACTIVE_LOW ? !on : on);
+  digitalWrite(ALARM_RELAY, RELAY_ACTIVE_LOW ? !on : on);
 }
 
 void toggleDoor(){
-    doorOpen = !doorOpen;
-    doorServo.write(doorOpen ? 90 : 0);
-    Blynk.virtualWrite(V0, doorOpen);
+  doorOpen = !doorOpen;
+  doorServo.write(doorOpen ? 90 : 0);
+  Blynk.virtualWrite(V0, doorOpen);
 }
 
 bool checkCard(){
-    for(byte i = 0; i < 4; i++){
-        if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
-    }
-    return true;
+  for(byte i = 0; i < 4; i++){
+    if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
+  }
+  return true;
 }
 
 // =================== BLYNK ===================
@@ -82,123 +83,126 @@ BLYNK_WRITE(V0){ toggleDoor(); }
 BLYNK_WRITE(V1){ led1 = param.asInt(); digitalWrite(LED1, led1); }
 BLYNK_WRITE(V2){ led2 = param.asInt(); digitalWrite(LED2, led2); }
 
-// V3: ON = tắt đèn PIR | OFF = PIR hoạt động
+// V3: ON = tắt đèn | OFF = PIR + LDR hoạt động
 BLYNK_WRITE(V3){
-    pirDisable = param.asInt();
-    if (pirDisable) {
-        pirOn = false;
-        digitalWrite(PIR_RELAY, LOW);
-    }
+  pirDisable = param.asInt();
+  if (pirDisable) {
+    pirOn = false;
+    digitalWrite(PIR_RELAY, LOW);
+  }
 }
 
 // =================== SETUP ===================
 void setup(){
-    Serial.begin(115200);
+  Serial.begin(115200);
 
-    pinMode(LED1, OUTPUT);
-    pinMode(LED2, OUTPUT);
-    pinMode(BTN1, INPUT_PULLUP);
-    pinMode(BTN2, INPUT_PULLUP);
-    pinMode(BTN_DOOR, INPUT_PULLUP);
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN_DOOR, INPUT_PULLUP);
 
-    pinMode(PIR_PIN, INPUT);
-    pinMode(PIR_RELAY, OUTPUT);
-    digitalWrite(PIR_RELAY, LOW);
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(PIR_RELAY, OUTPUT);
+  digitalWrite(PIR_RELAY, LOW);
 
-    pinMode(FIRE_PIN, INPUT);
-    pinMode(SMOKE_PIN, INPUT);
-    pinMode(ALARM_RELAY, OUTPUT);
-    pinMode(ALARM_BTN, INPUT_PULLUP);
-    setRelay(false);
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(SMOKE_PIN, INPUT);
+  pinMode(ALARM_RELAY, OUTPUT);
+  pinMode(ALARM_BTN, INPUT_PULLUP);
+  setRelay(false);
 
-    doorServo.attach(SERVO_PIN, 500, 2400);
-    doorServo.write(0);
+  doorServo.attach(SERVO_PIN, 500, 2400);
+  doorServo.write(0);
 
-    SPI.begin(18, 19, 23);
-    rfid.PCD_Init();
+  SPI.begin(18, 19, 23);
+  rfid.PCD_Init();
 
-    WiFi.begin(ssid, pass);
-    Blynk.config(BLYNK_AUTH_TOKEN);
-
-    Blynk.virtualWrite(V3, 0); // mặc định PIR bật
+  WiFi.begin(ssid, pass);
+  Blynk.config(BLYNK_AUTH_TOKEN);
+  Blynk.virtualWrite(V3, 0); // mặc định cho phép cảm biến
 }
 
 // =================== LOOP ===================
 void loop(){
-    Blynk.run();
+  Blynk.run();
 
-    // ---------- RFID ----------
-    if(rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()){
-        if(checkCard()) toggleDoor();
-        rfid.PICC_HaltA();
-        rfid.PCD_StopCrypto1();
+  // ---------- RFID ----------
+  if(rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()){
+    if(checkCard()) toggleDoor();
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+
+  // ---------- DOOR BUTTON ----------
+  if(!digitalRead(BTN_DOOR)){
+    toggleDoor();
+    delay(250);
+  }
+
+  // ---------- LED BUTTON ----------
+  if(!digitalRead(BTN1)){
+    led1 = !led1;
+    digitalWrite(LED1, led1);
+    Blynk.virtualWrite(V1, led1);
+    delay(200);
+  }
+  if(!digitalRead(BTN2)){
+    led2 = !led2;
+    digitalWrite(LED2, led2);
+    Blynk.virtualWrite(V2, led2);
+    delay(200);
+  }
+
+  // ---------- PIR + LDR LOGIC ----------
+  if (!pirDisable) {
+    bool motion = (digitalRead(PIR_PIN) == LOW); // có người
+    bool dark   = (digitalRead(LDR_PIN) == LOW); // trời tối
+
+    if (motion && dark) {
+      pirLastDetect = millis();
+      if (!pirOn) {
+        pirOn = true;
+        digitalWrite(PIR_RELAY, HIGH);
+      }
     }
 
-    // ---------- DOOR BUTTON ----------
-    if(!digitalRead(BTN_DOOR)){
-        toggleDoor();
-        delay(250);
+    if (pirOn && millis() - pirLastDetect >= PIR_TIME) {
+      pirOn = false;
+      digitalWrite(PIR_RELAY, LOW);
     }
+  }
 
-    // ---------- LED BUTTON ----------
-    if(!digitalRead(BTN1)){
-        led1 = !led1;
-        digitalWrite(LED1, led1);
-        Blynk.virtualWrite(V1, led1);
-        delay(200);
-    }
-    if(!digitalRead(BTN2)){
-        led2 = !led2;
-        digitalWrite(LED2, led2);
-        Blynk.virtualWrite(V2, led2);
-        delay(200);
-    }
+  // ---------- ALARM ----------
+  bool fire  = (digitalRead(FIRE_PIN)  == LOW);
+  bool smoke = (digitalRead(SMOKE_PIN) == LOW);
 
-    // ---------- PIR LOGIC ----------
-    if (!pirDisable) {
-        if (digitalRead(PIR_PIN) == LOW) {          // có người
-            pirLastDetect = millis();
-            if (!pirOn) {
-                pirOn = true;
-                digitalWrite(PIR_RELAY, HIGH);
-            }
-        }
+  if(!alarmActive && fire){
+    alarmActive = true;
+    alarmStart = millis();
+    setRelay(true);
+  }
 
-        if (pirOn && millis() - pirLastDetect >= PIR_TIME) {
-            pirOn = false;
-            digitalWrite(PIR_RELAY, LOW);
-        }
-    }
+  if(!alarmActive && smoke && !smokeLocked){
+    alarmActive = true;
+    smokeLocked = true;
+    alarmStart = millis();
+    setRelay(true);
+  }
 
-    // ---------- ALARM ----------
-    bool fire  = (digitalRead(FIRE_PIN)  == LOW);
-    bool smoke = (digitalRead(SMOKE_PIN) == LOW);
+  if(!alarmActive && !digitalRead(ALARM_BTN)){
+    alarmActive = true;
+    alarmStart = millis();
+    setRelay(true);
+  }
 
-    if(!alarmActive && fire){
-        alarmActive = true;
-        alarmStart = millis();
-        setRelay(true);
-    }
+  if(alarmActive && millis() - alarmStart >= ALARM_TIME){
+    alarmActive = false;
+    setRelay(false);
+  }
 
-    if(!alarmActive && smoke && !smokeLocked){
-        alarmActive = true;
-        smokeLocked = true;
-        alarmStart = millis();
-        setRelay(true);
-    }
-
-    if(!alarmActive && !digitalRead(ALARM_BTN)){
-        alarmActive = true;
-        alarmStart = millis();
-        setRelay(true);
-    }
-
-    if(alarmActive && millis() - alarmStart >= ALARM_TIME){
-        alarmActive = false;
-        setRelay(false);
-    }
-
-    if(!smoke){
-        smokeLocked = false;
-    }
+  if(!smoke){
+    smokeLocked = false;
+  }
 }
