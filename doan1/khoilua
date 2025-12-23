@@ -104,7 +104,7 @@ void setup(){
     digitalWrite(LIGHT_RELAY, LOW);   // đèn OFF ban đầu
 
     doorServo.attach(SERVO_PIN, 500, 2400);
-    doorServo.write(0);
+    doorServo.write(90);
 
     SPI.begin(18, 19, 23);
     rfid.PCD_Init();
