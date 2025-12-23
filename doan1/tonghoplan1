@@ -1,5 +1,6 @@
-//code đã chạy lamcuoi ngay 20/12
 // =================== PROJECT: RFID + SERVO DOOR + ALARM + BLYNK ===================
+// FIX: Smoke alarm chỉ kêu 1 lần, không kêu lặp
+
 #define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
 #define BLYNK_TEMPLATE_NAME "Cua RFID"
 #define BLYNK_AUTH_TOKEN "xUgwUcmvOuELccgrYD7lIPurla-hQNI5"
@@ -15,18 +16,17 @@
 char ssid[] = "Hostpot";
 char pass[] = "0123456788";
 
-// =================== PINS ===================
-// RFID
+// =================== RFID ===================
 #define SS_PIN   5
 #define RST_PIN  22
 MFRC522 rfid(SS_PIN, RST_PIN);
 
-// Servo
+// =================== SERVO ===================
 #define SERVO_PIN 14
 Servo doorServo;
 bool doorOpen = false;
 
-// LED & Button
+// =================== LED & BUTTON ===================
 #define LED1 25
 #define LED2 26
 #define BTN1 32
@@ -35,10 +35,10 @@ bool doorOpen = false;
 bool led1 = false, led2 = false;
 
 // =================== ALARM ===================
-#define FIRE_PIN   35
-#define SMOKE_PIN  34
-#define ALARM_RELAY 13
-#define ALARM_BTN   4
+#define FIRE_PIN     35
+#define SMOKE_PIN    34
+#define ALARM_RELAY  13
+#define ALARM_BTN    4
 
 const bool RELAY_ACTIVE_LOW = false;
 const unsigned long ALARM_TIME = 4000;
@@ -48,7 +48,7 @@ bool smokeLocked = false;     // 🔒 KHÓA KHÓI
 unsigned long alarmStart = 0;
 
 // =================== AUTHORIZED CARD ===================
-byte allowedUID[4] = {0xE7,0x8B,0x6B,0x06};
+byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
 
 // =================== UTILS ===================
 void setRelay(bool on){
@@ -62,7 +62,7 @@ void toggleDoor(){
 }
 
 bool checkCard(){
-    for(byte i=0;i<4;i++){
+    for(byte i = 0; i < 4; i++){
         if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
     }
     return true;
@@ -116,7 +116,7 @@ void loop(){
         delay(250);
     }
 
-    // ---------- LED BUTTONS ----------
+    // ---------- LED BUTTON ----------
     if(!digitalRead(BTN1)){
         led1 = !led1;
         digitalWrite(LED1, led1);
@@ -130,19 +130,26 @@ void loop(){
         delay(200);
     }
 
-    // ---------- READ SENSOR ----------
+    // ---------- ALARM AUTO ----------
     bool fire  = (digitalRead(FIRE_PIN)  == LOW);
     bool smoke = (digitalRead(SMOKE_PIN) == LOW);
 
-    // ---------- AUTO ALARM (CHỈ 1 LẦN / KHÓI) ----------
-    if(!alarmActive && !smokeLocked && (fire || smoke)){
+    // 🔥 CẢM BIẾN LỬA (không khóa)
+    if(!alarmActive && fire){
         alarmActive = true;
-        smokeLocked = true;          // 🔒 khóa
         alarmStart = millis();
         setRelay(true);
     }
 
-    // ---------- MANUAL ALARM BUTTON ----------
+    // 💨 CẢM BIẾN KHÓI (kêu 1 lần)
+    if(!alarmActive && smoke && !smokeLocked){
+        alarmActive = true;
+        smokeLocked = true;   // 🔒 khóa khói
+        alarmStart = millis();
+        setRelay(true);
+    }
+
+    // ---------- ALARM BUTTON ----------
     if(!alarmActive && !digitalRead(ALARM_BTN)){
         alarmActive = true;
         alarmStart = millis();
@@ -156,7 +163,7 @@ void loop(){
     }
 
     // ---------- RESET KHÓA KHI HẾT KHÓI ----------
-    if(!fire && !smoke){
+    if(!smoke){
         smokeLocked = false;
     }
 }
