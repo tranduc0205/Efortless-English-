@@ -1,5 +1,5 @@
 // =================== PROJECT: RFID + SERVO + ALARM + AUTO LIGHT + BLYNK ===================
-// Auto Light: Trời tối (LDR D0) + Có người (IR) -> Bật đèn
+// Auto Light: Trời tối (LDR D0) + Có người (IR) -> Bật đèn 20 giây
 
 #define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
 #define BLYNK_TEMPLATE_NAME "Cua RFID"
@@ -51,6 +51,10 @@ unsigned long alarmStart = 0;
 #define LIGHT_RELAY 12     // Relay đèn
 #define IR_PIN      16     // Cảm biến hồng ngoại
 #define LDR_D0      39     // Cảm biến ánh sáng D0 (SN)
+#define LIGHT_TIME  20000UL // 20 giây
+
+bool lightOn = false;
+unsigned long lightStart = 0;
 
 // =================== RFID UID ===================
 byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
@@ -172,13 +176,18 @@ void loop(){
         smokeLocked = false;
     }
 
-    // ---------- AUTO LIGHT ----------
-    bool dark  = (digitalRead(LDR_D0) == LOW);  // LOW = tối
+    // ---------- AUTO LIGHT (20s) ----------
+    bool dark  = (digitalRead(LDR_D0) == LOW);  // LOW = tối (nếu ngược, đổi thành HIGH)
     bool human = (digitalRead(IR_PIN) == LOW);  // LOW = có người
 
     if(dark && human){
-        digitalWrite(LIGHT_RELAY, HIGH);   // bật đèn
-    }else{
-        digitalWrite(LIGHT_RELAY, LOW);    // tắt đèn
+        digitalWrite(LIGHT_RELAY, HIGH);  // bật đèn
+        lightOn = true;
+        lightStart = millis();            // reset 20s
+    }
+
+    if(lightOn && millis() - lightStart >= LIGHT_TIME){
+        digitalWrite(LIGHT_RELAY, LOW);   // tắt đèn
+        lightOn = false;
     }
 }
