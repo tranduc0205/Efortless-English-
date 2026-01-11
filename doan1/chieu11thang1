@@ -1,0 +1,243 @@
+// =================== PROJECT: RFID + SERVO DOOR + ALARM + BLYNK ===================
+
+#define BLYNK_TEMPLATE_ID "TMPL6qx9EcB05"
+#define BLYNK_TEMPLATE_NAME "Cua RFID"
+#define BLYNK_AUTH_TOKEN "xUgwUcmvOuELccgrYD7lIPurla-hQNI5"
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <ESP32Servo.h>
+
+// =================== WIFI ===================
+char ssid[] = "Hostpot";
+char pass[] = "0123456788";
+
+// =================== RFID ===================
+#define SS_PIN   5
+#define RST_PIN  22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// =================== SERVO ===================
+#define SERVO_PIN 14
+Servo doorServo;
+bool doorOpen = false;
+
+// =================== LED & BUTTON ===================
+#define LED1 25
+#define LED2 26
+#define BTN1 32
+#define BTN2 33
+#define BTN_DOOR 27
+bool led1 = false, led2 = false;
+
+// =================== PIR + LDR ===================
+#define PIR_PIN     16
+#define LDR_PIN     17
+#define PIR_RELAY   12
+const unsigned long PIR_TIME = 5000;
+
+unsigned long pirLastDetect = 0;
+bool pirOn = false;
+
+// Blynk control
+bool forceOff = false;
+bool forceOn  = false;
+
+// =================== ALARM ===================
+#define FIRE_PIN     35
+#define SMOKE_PIN    34
+#define ALARM_RELAY  13
+#define ALARM_BTN    4
+
+const bool RELAY_ACTIVE_LOW = false;
+
+// ---- CHỐNG NHIỄU / THỜI GIAN ----
+const unsigned long FIRE_CONFIRM_TIME  = 500;   // 0.5s
+const unsigned long SMOKE_CONFIRM_TIME = 1200;  // 1.2s
+const unsigned long IGNORE_TIME        = 700;   // 0.7s
+const unsigned long FIRE_ALARM_TIME    = 1500;  // lửa kêu 1.5s
+
+unsigned long fireConfirmStart  = 0;
+unsigned long smokeConfirmStart = 0;
+unsigned long ignoreAlarmUntil  = 0;
+unsigned long fireAlarmStart    = 0;
+
+bool fireAlarmActive  = false;
+bool gasAlarmActive   = false;
+
+// =================== AUTHORIZED CARD ===================
+byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
+
+// =================== UTILS ===================
+void setRelay(bool on){
+  digitalWrite(ALARM_RELAY, RELAY_ACTIVE_LOW ? !on : on);
+}
+
+void toggleDoor(){
+  doorOpen = !doorOpen;
+  doorServo.write(doorOpen ? 90 : 0);
+  Blynk.virtualWrite(V0, doorOpen);
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+bool checkCard(){
+  for(byte i = 0; i < 4; i++){
+    if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
+  }
+  return true;
+}
+
+// =================== BLYNK ===================
+BLYNK_WRITE(V0){ toggleDoor(); }
+BLYNK_WRITE(V1){ led1 = param.asInt(); digitalWrite(LED1, led1); ignoreAlarmUntil = millis() + IGNORE_TIME; }
+BLYNK_WRITE(V2){ led2 = param.asInt(); digitalWrite(LED2, led2); ignoreAlarmUntil = millis() + IGNORE_TIME; }
+
+BLYNK_WRITE(V3){
+  forceOff = param.asInt();
+  pirOn = false;
+  digitalWrite(PIR_RELAY, LOW);
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+BLYNK_WRITE(V4){
+  forceOn = param.asInt();
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+// =================== SETUP ===================
+void setup(){
+  Serial.begin(115200);
+
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN_DOOR, INPUT_PULLUP);
+
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(PIR_RELAY, OUTPUT);
+  digitalWrite(PIR_RELAY, LOW);
+
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(SMOKE_PIN, INPUT);
+  pinMode(ALARM_RELAY, OUTPUT);
+  pinMode(ALARM_BTN, INPUT_PULLUP);
+  setRelay(false);
+
+  doorServo.attach(SERVO_PIN, 500, 2400);
+  doorServo.write(0);
+
+  SPI.begin(18, 19, 23);
+  rfid.PCD_Init();
+
+  WiFi.begin(ssid, pass);
+  Blynk.config(BLYNK_AUTH_TOKEN);
+}
+
+// =================== LOOP ===================
+void loop(){
+  Blynk.run();
+
+  // ---------- RFID ----------
+  if(rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()){
+    if(checkCard()) toggleDoor();
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+
+  // ---------- BUTTON ----------
+  if(!digitalRead(BTN_DOOR)){
+    toggleDoor();
+    delay(250);
+  }
+
+  if(!digitalRead(BTN1)){
+    led1 = !led1;
+    digitalWrite(LED1, led1);
+    Blynk.virtualWrite(V1, led1);
+    ignoreAlarmUntil = millis() + IGNORE_TIME;
+    delay(200);
+  }
+
+  if(!digitalRead(BTN2)){
+    led2 = !led2;
+    digitalWrite(LED2, led2);
+    Blynk.virtualWrite(V2, led2);
+    ignoreAlarmUntil = millis() + IGNORE_TIME;
+    delay(200);
+  }
+
+  // ---------- PIR ----------
+  if(forceOff){
+    digitalWrite(PIR_RELAY, LOW);
+  }
+  else if(forceOn){
+    digitalWrite(PIR_RELAY, HIGH);
+  }
+  else{
+    bool motion = (digitalRead(PIR_PIN) == LOW);
+    bool dark   = (digitalRead(LDR_PIN) == LOW);
+
+    if(motion && dark){
+      pirLastDetect = millis();
+      pirOn = true;
+      digitalWrite(PIR_RELAY, HIGH);
+    }
+
+    if(pirOn && millis() - pirLastDetect >= PIR_TIME){
+      pirOn = false;
+      digitalWrite(PIR_RELAY, LOW);
+    }
+  }
+
+  // ================== ALARM ==================
+  bool ignoreAlarm = (millis() < ignoreAlarmUntil);
+  bool fireNow  = (digitalRead(FIRE_PIN)  == LOW);
+  bool smokeNow = (digitalRead(SMOKE_PIN) == LOW);
+
+  // ----- FIRE (kêu ngắt) -----
+  if(fireNow){
+    if(fireConfirmStart == 0) fireConfirmStart = millis();
+
+    if(!ignoreAlarm &&
+       !fireAlarmActive &&
+       millis() - fireConfirmStart >= FIRE_CONFIRM_TIME){
+      fireAlarmActive = true;
+      fireAlarmStart = millis();
+      setRelay(true);
+    }
+  } else {
+    fireConfirmStart = 0;
+  }
+
+  if(fireAlarmActive && millis() - fireAlarmStart >= FIRE_ALARM_TIME){
+    fireAlarmActive = false;
+    if(!gasAlarmActive) setRelay(false);
+  }
+
+  // ----- GAS (kêu liên tục) -----
+  if(smokeNow){
+    if(smokeConfirmStart == 0) smokeConfirmStart = millis();
+
+    if(!ignoreAlarm &&
+       millis() - smokeConfirmStart >= SMOKE_CONFIRM_TIME){
+      gasAlarmActive = true;
+      setRelay(true);
+    }
+  } else {
+    smokeConfirmStart = 0;
+    gasAlarmActive = false;
+    if(!fireAlarmActive) setRelay(false);
+  }
+
+  // ----- MANUAL -----
+  if(!fireAlarmActive && !gasAlarmActive && !digitalRead(ALARM_BTN)){
+    setRelay(true);
+    delay(1000);
+    setRelay(false);
+  }
+}
