@@ -1,0 +1,256 @@
+// DỰ ÁN: MÔ HÌNH NHÀ THÔNG MINH
+// Chức năng: Mở cửa bằng RFID + Servo, điều khiển đèn,
+//             cảnh báo khí gas & lửa, điều khiển qua Blynk
+
+// ---------- Thông tin kết nối Blynk ----------
+#define BLYNK_TEMPLATE_ID   "TMPL6qx9EcB05"
+#define BLYNK_TEMPLATE_NAME "Cua RFID"
+#define BLYNK_AUTH_TOKEN    "xUgwUcmvOuELccgrYD7lIPurla-hQNI5"
+
+// ---------- Thư viện sử dụng ----------
+#include <WiFi.h>                 // Kết nối WiFi
+#include <WiFiClient.h>
+#include <BlynkSimpleEsp32.h>     // Giao tiếp với ứng dụng Blynk
+#include <SPI.h>                  // Giao tiếp SPI
+#include <MFRC522.h>              // Thư viện RFID RC522
+#include <ESP32Servo.h>           // Điều khiển servo cho ESP32
+
+// =================== WIFI ===================
+char ssid[] = "Hostpot";
+char pass[] = "0123456788";
+
+// Khai báo chân kết nối module RFID RC522
+#define SS_PIN   5
+#define RST_PIN  22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// =================== SERVO ===================
+#define SERVO_PIN 14
+Servo doorServo;
+bool doorOpen = false;   // Biến lưu trạng thái cửa (mở / đóng)
+
+// Khai báo đèn và nút nhấn điều khiển thủ công
+#define LED1 25
+#define LED2 26
+#define BTN1 32
+#define BTN2 33
+#define BTN_DOOR 27
+
+bool led1 = false, led2 = false;  // Trạng thái đèn
+
+// Cảm biến chuyển động và ánh sáng
+#define PIR_PIN     16
+#define LDR_PIN     17
+#define PIR_RELAY   12             // Relay điều khiển đèn cảm biến
+const unsigned long PIR_TIME = 5000; // Thời gian bật đèn (ms)
+
+unsigned long pirLastDetect = 0;  // Lưu thời điểm phát hiện chuyển động
+bool pirOn = false;               // Trạng thái đèn cảm biến
+
+// Điều khiển ưu tiên từ Blynk
+bool forceOff = false;  // Tắt đèn cảm biến
+bool forceOn  = false;  // Bật đèn cảm biến liên tục
+
+// =================== ALARM ===================
+// Cảm biến lửa, khí gas và còi báo động
+#define FIRE_PIN     35
+#define SMOKE_PIN    34
+#define ALARM_RELAY  13
+#define ALARM_BTN    4
+
+// Relay kích mức cao
+const bool RELAY_ACTIVE_LOW = false;
+
+// ---------- Chống nhiễu & thời gian xác nhận ----------
+const unsigned long FIRE_CONFIRM_TIME  = 500;   // Xác nhận lửa 0.5s
+const unsigned long SMOKE_CONFIRM_TIME = 1200;  // Xác nhận gas 1.2s
+const unsigned long IGNORE_TIME        = 700;   // Bỏ qua cảnh báo tạm thời
+const unsigned long FIRE_ALARM_TIME    = 1500;  // Thời gian còi khi có lửa
+
+unsigned long fireConfirmStart  = 0;
+unsigned long smokeConfirmStart = 0;
+unsigned long ignoreAlarmUntil  = 0;
+unsigned long fireAlarmStart    = 0;
+
+bool fireAlarmActive = false;
+bool gasAlarmActive  = false;
+
+// =================== THẺ RFID HỢP LỆ ===================
+// UID của thẻ được phép mở cửa
+byte allowedUID[4] = {0xE7, 0x8B, 0x6B, 0x06};
+
+// =================== HÀM HỖ TRỢ ===================
+// Hàm bật/tắt relay còi báo động
+void setRelay(bool on){
+  digitalWrite(ALARM_RELAY, RELAY_ACTIVE_LOW ? !on : on);
+}
+
+// Hàm đổi trạng thái cửa (đóng <-> mở)
+void toggleDoor(){
+  doorOpen = !doorOpen;                       // Đổi trạng thái cửa
+  doorServo.write(doorOpen ? 90 : 0);         // Quay servo
+  Blynk.virtualWrite(V0, doorOpen);            // Cập nhật lên Blynk
+  ignoreAlarmUntil = millis() + IGNORE_TIME;  // Tránh báo động giả
+}
+
+// Kiểm tra thẻ RFID có hợp lệ hay không
+bool checkCard(){
+  for(byte i = 0; i < 4; i++){
+    if(rfid.uid.uidByte[i] != allowedUID[i]) return false;
+  }
+  return true;
+}
+
+// =================== BLYNK ===================
+// Điều khiển cửa từ Blynk
+BLYNK_WRITE(V0){ toggleDoor(); }
+
+// Điều khiển đèn 1
+BLYNK_WRITE(V1){
+  led1 = param.asInt();
+  digitalWrite(LED1, led1);
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+// Điều khiển đèn 2
+BLYNK_WRITE(V2){
+  led2 = param.asInt();
+  digitalWrite(LED2, led2);
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+// Tắt đèn cảm biến
+BLYNK_WRITE(V3){
+  forceOff = param.asInt();
+  pirOn = false;
+  digitalWrite(PIR_RELAY, LOW);
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+// Bật đèn cảm biến liên tục
+BLYNK_WRITE(V4){
+  forceOn = param.asInt();
+  ignoreAlarmUntil = millis() + IGNORE_TIME;
+}
+
+// =================== SETUP ===================
+void setup(){
+  Serial.begin(115200);
+
+  // Cấu hình đèn và nút nhấn
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN_DOOR, INPUT_PULLUP);
+
+  // Cảm biến PIR và LDR
+  pinMode(PIR_PIN, INPUT);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(PIR_RELAY, OUTPUT);
+  digitalWrite(PIR_RELAY, LOW);
+
+  // Cảm biến gas, lửa và còi
+  pinMode(FIRE_PIN, INPUT);
+  pinMode(SMOKE_PIN, INPUT);
+  pinMode(ALARM_RELAY, OUTPUT);
+  pinMode(ALARM_BTN, INPUT_PULLUP);
+  setRelay(false);
+
+  // Servo cửa
+  doorServo.attach(SERVO_PIN, 500, 2400);
+  doorServo.write(0);
+
+  // RFID
+  SPI.begin(18, 19, 23);
+  rfid.PCD_Init();
+
+  // Kết nối WiFi & Blynk
+  WiFi.begin(ssid, pass);
+  Blynk.config(BLYNK_AUTH_TOKEN);
+}
+
+// =================== LOOP ===================
+void loop(){
+  Blynk.run(); // Luôn duy trì kết nối với Blynk
+
+  // ---------- RFID ----------
+  if(rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()){
+    if(checkCard()) toggleDoor();
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+
+  // ---------- NÚT NHẤN ----------
+  if(!digitalRead(BTN_DOOR)){
+    toggleDoor();
+    delay(250);
+  }
+
+  if(!digitalRead(BTN1)){
+    led1 = !led1;
+    digitalWrite(LED1, led1);
+    Blynk.virtualWrite(V1, led1);
+    delay(200);
+  }
+
+  if(!digitalRead(BTN2)){
+    led2 = !led2;
+    digitalWrite(LED2, led2);
+    Blynk.virtualWrite(V2, led2);
+    delay(200);
+  }
+
+  // ---------- ĐÈN CẢM BIẾN ----------
+  if(forceOff){
+    digitalWrite(PIR_RELAY, LOW);
+  }
+  else if(forceOn){
+    digitalWrite(PIR_RELAY, HIGH);
+  }
+  else{
+    bool motion = (digitalRead(PIR_PIN) == LOW);
+    bool dark   = (digitalRead(LDR_PIN) == LOW);
+
+    if(motion && dark){
+      pirLastDetect = millis();
+      pirOn = true;
+      digitalWrite(PIR_RELAY, HIGH);
+    }
+
+    if(pirOn && millis() - pirLastDetect >= PIR_TIME){
+      pirOn = false;
+      digitalWrite(PIR_RELAY, LOW);
+    }
+  }
+
+  // ---------- CẢNH BÁO ----------
+  bool fireNow  = (digitalRead(FIRE_PIN)  == LOW);
+  bool smokeNow = (digitalRead(SMOKE_PIN) == LOW);
+
+  // Lửa
+  if(fireNow && !fireAlarmActive){
+    fireAlarmActive = true;
+    setRelay(true);
+  }
+
+  // Gas
+  if(smokeNow && !gasAlarmActive){
+    gasAlarmActive = true;
+    setRelay(true);
+  }
+
+  // Tắt còi khi hết nguy hiểm
+  if(!fireNow && !smokeNow){
+    fireAlarmActive = false;
+    gasAlarmActive  = false;
+    setRelay(false);
+  }
+
+  // Còi thủ công
+  if(!digitalRead(ALARM_BTN)){
+    setRelay(true);
+    delay(1000);
+    setRelay(false);
+  }
+}
